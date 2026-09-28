@@ -117,7 +117,12 @@ endif
 
 TARGET_NAME := pcsx_rearmed
 ARCH_DETECTED := $(shell $(firstword $(CC)) -dumpmachine $(CFLAGS) | awk -F- '{print $$1}')
-GIT_VERSION := " $(shell git rev-parse --short HEAD || echo unknown)"
+# TIERES: report the upstream commit this branch is built on, not the
+# branch's own HEAD - its commits don't change what the emulation does, and
+# RetroArch TIERES players compare this version in the [SYNC] fingerprint
+# (see README-TIERES.md). Also used for include/revision.h in Makefile.
+TIERES_BASE ?= 8625c39
+GIT_VERSION := " $(shell git rev-parse --short $(TIERES_BASE) || echo unknown)"
 ifneq ($(GIT_VERSION)," unknown")
 	CFLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
 endif
@@ -637,6 +642,10 @@ endif
 	LIBM :=
 	USE_LIBRETRO_VFS = 1
 	USE_ASYNC_SPU = 0 # uses posix semaphore.h
+	# TIERES: 32 MB Lightrec code buffer instead of the default 8 MB, which
+	# long netplay matches can exhaust - see README-TIERES.md
+	TIERES_CODE_BUFFER_SIZE ?= 33554432
+	CFLAGS += -DCODE_BUFFER_SIZE=$(TIERES_CODE_BUFFER_SIZE)
 endif
 
 CFLAGS += $(fpic)

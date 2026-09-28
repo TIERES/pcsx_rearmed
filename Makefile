@@ -508,7 +508,7 @@ frontend/libpicofe/%.c:
 	@exit 1
 
 include/revision.h: FORCE
-	@(git describe --always || echo) | sed -e 's/.*/#define REV "\0"/' > $@_
+	@(git describe --always $(TIERES_BASE) || echo) | sed -e 's/.*/#define REV "\0"/' > $@_
 	@diff -q $@_ $@ > /dev/null 2>&1 || cp $@_ $@
 	@rm $@_
 
