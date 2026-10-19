@@ -88,6 +88,18 @@
 #define RAM_SIZE	0x200000
 #define BIOS_SIZE	0x80000
 
+/* TIERES: where the recompiled direct loads/stores go when the address is
+ * none of the PSX buffers - a game's uninitialized pointer (WorldCup26
+ * PepeWEmx's memory card screens draw through 0x1000a000). Loads read 0xff
+ * bytes, like PCSX's interpreter (psxMemRead*), and stores land in a sink
+ * nobody reads, instead of host memory far outside the buffers. The emitted
+ * address is (addr & 0xfff) + LIGHTREC_BAD_IO_BASE, plus at most a 16-bit
+ * immediate. */
+#define LIGHTREC_BAD_IO_SIZE	0x18000
+#define LIGHTREC_BAD_IO_BASE	0x8000
+extern u8 lightrec_bad_io_read[LIGHTREC_BAD_IO_SIZE];
+extern u8 lightrec_bad_io_sink[LIGHTREC_BAD_IO_SIZE];
+
 #define CODE_LUT_SIZE	((RAM_SIZE + BIOS_SIZE) >> 2)
 
 #define REG_LO 32

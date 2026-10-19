@@ -115,15 +115,46 @@ static const struct lightrec_mem_map_ops lightrec_default_ops = {
 	.swu = lightrec_default_swu,
 };
 
-static void __segfault_cb(struct lightrec_state *state, u32 addr,
-			  const struct block *block)
+/* TIERES: an address no map covers - typically a game's uninitialized
+ * pointer - behaves like in PCSX's interpreter (psxmem.c): loads get all
+ * bits set, stores are dropped. Upstream raised LIGHTREC_EXIT_SEGFAULT
+ * instead, which ends the whole emulator (exit(1) in plugin.c). */
+u8 lightrec_bad_io_read[LIGHTREC_BAD_IO_SIZE];
+u8 lightrec_bad_io_sink[LIGHTREC_BAD_IO_SIZE];
+
+static void lightrec_unmapped_sb(struct lightrec_state *state, u32 opcode,
+				 void *host, u32 addr, u32 data)
 {
-	lightrec_set_exit_flags(state, LIGHTREC_EXIT_SEGFAULT);
-	pr_err("Segmentation fault in recompiled code: invalid "
-	       "load/store at address "PC_FMT"\n", addr);
-	if (block)
-		pr_err("Was executing block "PC_FMT"\n", block->pc);
 }
+
+static u8 lightrec_unmapped_lb(struct lightrec_state *state,
+			       u32 opcode, void *host, u32 addr)
+{
+	return 0xff;
+}
+
+static u16 lightrec_unmapped_lh(struct lightrec_state *state,
+				u32 opcode, void *host, u32 addr)
+{
+	return 0xffff;
+}
+
+static u32 lightrec_unmapped_lw(struct lightrec_state *state,
+				u32 opcode, void *host, u32 addr)
+{
+	return 0xffffffff;
+}
+
+static const struct lightrec_mem_map_ops lightrec_unmapped_ops = {
+	.sb = lightrec_unmapped_sb,
+	.sh = lightrec_unmapped_sb,
+	.sw = lightrec_unmapped_sb,
+	.lb = lightrec_unmapped_lb,
+	.lh = lightrec_unmapped_lh,
+	.lw = lightrec_unmapped_lw,
+	.lwu = lightrec_unmapped_lw,
+	.swu = lightrec_unmapped_sb,
+};
 
 static void lightrec_swl(struct lightrec_state *state,
 			 const struct lightrec_mem_map_ops *ops,
@@ -276,16 +307,19 @@ u32 lightrec_rw(struct lightrec_state *state, union code op, u32 base,
 
 	addr = kunseg(base + (s16) op.i.imm);
 
-	map = lightrec_get_map(state, &host, addr);
-	if (!map) {
-		__segfault_cb(state, addr, block);
-		return 0;
-	}
-
 	if (flags)
 		was_tagged = LIGHTREC_FLAGS_GET_IO_MODE(*flags);
 
-	if (likely(!map->ops)) {
+	map = lightrec_get_map(state, &host, addr);
+	if (unlikely(!map)) {
+		/* TIERES: see lightrec_unmapped_ops. Tagged as a HW access, the
+		 * opcode keeps coming here once recompiled. */
+		if (flags && !was_tagged)
+			*flags |= LIGHTREC_IO_MODE(LIGHTREC_IO_HW);
+
+		ops = &lightrec_unmapped_ops;
+		host = NULL;
+	} else if (likely(!map->ops)) {
 		if (flags && !LIGHTREC_FLAGS_GET_IO_MODE(*flags)) {
 			/* Force parallel port accesses as HW accesses, because
 			 * the direct-I/O emitters can't differenciate it. */
@@ -1922,6 +1956,9 @@ struct lightrec_state * lightrec_init(char *argv0,
 		pr_debug("Optional cop2_notify callback in lightrec_ops\n");
 	else
 		pr_debug("No optional cop2_notify callback in lightrec_ops\n");
+
+	/* TIERES: what a direct load from an unmapped address reads. */
+	memset(lightrec_bad_io_read, 0xff, sizeof(lightrec_bad_io_read));
 
 	if (ENABLE_CODE_BUFFER && nb > PSX_MAP_CODE_BUFFER
 	    && codebuf_map->address) {
