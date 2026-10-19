@@ -1446,7 +1446,7 @@ static void rec_store_direct_no_invalidate(struct lightrec_cstate *cstate,
 	struct regcache *reg_cache = cstate->reg_cache;
 	union code c = block->opcode_list[offset].c;
 	jit_state_t *_jit = block->_jit;
-	jit_node_t *to_not_ram, *to_end;
+	jit_node_t *to_not_ram, *to_end, *to_scratch, *to_end2;
 	bool swc2 = c.i.op == OP_SWC2;
 	u8 addr_reg, tmp, tmp2 = 0, rs, rt, src_reg, in_reg = swc2 ? REG_TEMP : c.i.rt;
 	s16 imm;
@@ -1472,14 +1472,28 @@ static void rec_store_direct_no_invalidate(struct lightrec_cstate *cstate,
 	if (state->offset_ram != state->offset_scratch) {
 		tmp2 = lightrec_alloc_reg_temp(reg_cache, _jit);
 
-		to_not_ram = jit_bmsi(tmp, BIT(28));
+		/* TIERES: any of the bits above the RAM, not just BIT(28) -
+		 * 0x0f800000 isn't RAM either. */
+		to_not_ram = jit_bmsi(tmp, 0x1f800000);
 
 		jit_movi(tmp2, state->offset_ram);
 
 		to_end = jit_b();
 		jit_patch(to_not_ram);
 
+		/* TIERES: only the scratchpad buffer (psxH, 64 KiB) is above
+		 * the RAM - see LIGHTREC_BAD_IO_BASE. */
+		jit_andi(tmp2, tmp, 0x1fff0000);
+		to_scratch = jit_beqi(tmp2, 0x1f800000);
+
+		jit_andi(tmp, tmp, 0xfff);
+		jit_movi(tmp2, (uintptr_t)lightrec_bad_io_sink + LIGHTREC_BAD_IO_BASE);
+
+		to_end2 = jit_b();
+		jit_patch(to_scratch);
+
 		jit_movi(tmp2, state->offset_scratch);
+		jit_patch(to_end2);
 		jit_patch(to_end);
 	} else if (state->offset_ram) {
 		tmp2 = lightrec_alloc_reg_temp_with_value(reg_cache, _jit,
@@ -1520,7 +1534,7 @@ static void rec_store_direct(struct lightrec_cstate *cstate, const struct block 
 	struct regcache *reg_cache = cstate->reg_cache;
 	union code c = block->opcode_list[offset].c;
 	jit_state_t *_jit = block->_jit;
-	jit_node_t *to_not_ram, *to_end;
+	jit_node_t *to_not_ram, *to_end, *to_scratch, *to_end2;
 	bool swc2 = c.i.op == OP_SWC2;
 	u8 src_reg, addr_reg, tmp, tmp2, tmp3, rs, rt, reg_imm;
 	u8 in_reg = swc2 ? REG_TEMP : c.i.rt;
@@ -1587,13 +1601,26 @@ static void rec_store_direct(struct lightrec_cstate *cstate, const struct block 
 
 		to_end = jit_b();
 		jit_patch(to_not_ram);
+
+		/* TIERES: only the scratchpad buffer (psxH, 64 KiB) is above
+		 * the RAM - see LIGHTREC_BAD_IO_BASE. */
+		jit_andi(tmp, tmp2, 0x1fff0000);
+		to_scratch = jit_beqi(tmp, 0x1f800000);
+
+		jit_andi(tmp2, tmp2, 0xfff);
+		jit_movi(tmp, (uintptr_t)lightrec_bad_io_sink + LIGHTREC_BAD_IO_BASE);
+
+		to_end2 = jit_b();
+		jit_patch(to_scratch);
 	}
 
 	if (state->offset_ram || state->offset_scratch)
 		jit_movi(tmp, state->offset_scratch);
 
-	if (different_offsets)
+	if (different_offsets) {
+		jit_patch(to_end2);
 		jit_patch(to_end);
+	}
 
 	if (state->offset_ram || state->offset_scratch)
 		jit_addr(tmp2, tmp2, tmp);
@@ -1832,6 +1859,7 @@ static void rec_load_direct(struct lightrec_cstate *cstate,
 	bool load_delay = op_flag_load_delay(op->flags) && !cstate->no_load_delay;
 	jit_state_t *_jit = block->_jit;
 	jit_node_t *to_not_ram, *to_not_bios, *to_end, *to_end2;
+	jit_node_t *to_end3, *to_bad = NULL, *to_bad2;
 	u8 tmp, rs, rt, out_reg, addr_reg, flags = REG_EXT;
 	bool different_offsets = state->offset_bios != state->offset_scratch;
 	union code c = op->c;
@@ -1919,8 +1947,14 @@ static void rec_load_direct(struct lightrec_cstate *cstate,
 
 		jit_patch(to_not_ram);
 
-		if (different_offsets)
+		if (different_offsets) {
 			to_not_bios = jit_bmci(addr_reg, BIT(22));
+
+			/* TIERES: only the BIOS and the scratchpad buffers are
+			 * above the RAM - see LIGHTREC_BAD_IO_BASE. */
+			jit_andi(tmp, addr_reg, 0x1fc00000);
+			to_bad = jit_bnei(tmp, 0x1fc00000);
+		}
 
 		/* Convert to KUNSEG */
 		jit_andi(rt, addr_reg, 0x1fc00000 | (BIOS_SIZE - 1));
@@ -1932,13 +1966,25 @@ static void rec_load_direct(struct lightrec_cstate *cstate,
 
 			jit_patch(to_not_bios);
 
+			jit_andi(tmp, addr_reg, 0x1f800000);
+			to_bad2 = jit_bnei(tmp, 0x1f800000);
+
 			/* Convert to KUNSEG */
 			jit_andi(rt, addr_reg, 0x1f800fff);
 
-			if (state->offset_scratch)
-				jit_movi(tmp, state->offset_scratch);
+			jit_movi(tmp, state->offset_scratch);
+
+			to_end3 = jit_b();
+
+			jit_patch(to_bad);
+			jit_patch(to_bad2);
+
+			jit_andi(rt, addr_reg, 0xfff);
+			jit_movi(tmp, (uintptr_t)lightrec_bad_io_read
+				 + LIGHTREC_BAD_IO_BASE);
 
 			jit_patch(to_end2);
+			jit_patch(to_end3);
 		}
 
 		jit_patch(to_end);
